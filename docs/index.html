@@ -1,0 +1,822 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>wg-mesh — WireGuard point-to-point mesh generator</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/tweetnacl/1.0.3/nacl.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<style>
+:root{
+  --bg:#0a0e14;
+  --panel:#10151d;
+  --panel-alt:#161c26;
+  --border:#222a37;
+  --border-soft:#1a212c;
+  --text:#dde3ea;
+  --text-dim:#8894a3;
+  --text-faint:#57626f;
+  --accent:#4fd8c4;
+  --accent-dim:#2a5f57;
+  --key:#f0a83a;
+  --danger:#e5657a;
+  --radius:6px;
+}
+*{box-sizing:border-box;}
+html,body{margin:0;padding:0;}
+body{
+  background:var(--bg);
+  color:var(--text);
+  font-family:'Space Grotesk',system-ui,sans-serif;
+  line-height:1.4;
+  min-height:100vh;
+}
+body::before{
+  content:"";
+  position:fixed; inset:0;
+  background-image:
+    linear-gradient(var(--border-soft) 1px, transparent 1px),
+    linear-gradient(90deg, var(--border-soft) 1px, transparent 1px);
+  background-size:40px 40px;
+  opacity:.35;
+  pointer-events:none;
+  z-index:0;
+}
+a{color:var(--accent);}
+.mono{font-family:'JetBrains Mono',monospace;}
+header{
+  position:relative; z-index:1;
+  padding:28px 32px 18px;
+  border-bottom:1px solid var(--border);
+  display:flex; align-items:baseline; justify-content:space-between; gap:20px;
+  flex-wrap:wrap;
+}
+header .brand{display:flex; align-items:baseline; gap:14px;}
+header h1{
+  font-size:20px; margin:0; letter-spacing:.5px; font-weight:700;
+}
+header h1 .dot{color:var(--accent);}
+header .tag{
+  color:var(--text-dim); font-size:12.5px; font-family:'JetBrains Mono',monospace;
+}
+header .sub{font-size:12px; color:var(--text-faint); font-family:'JetBrains Mono',monospace;}
+
+.layout{
+  position:relative; z-index:1;
+  display:grid;
+  grid-template-columns:360px 1fr;
+  gap:0;
+  min-height:calc(100vh - 84px);
+}
+@media (max-width:960px){ .layout{grid-template-columns:1fr;} }
+
+.sidebar{
+  border-right:1px solid var(--border);
+  padding:24px;
+  display:flex; flex-direction:column; gap:26px;
+  background:linear-gradient(180deg, rgba(255,255,255,.012), transparent 200px);
+}
+main{padding:24px 28px 60px;}
+
+.section-label{
+  font-size:11px; text-transform:uppercase; letter-spacing:1.4px;
+  color:var(--text-faint); font-weight:700; margin:0 0 10px;
+  display:flex; align-items:center; gap:8px;
+}
+.section-label .n{color:var(--accent); font-family:'JetBrains Mono',monospace;}
+
+.card{
+  background:var(--panel);
+  border:1px solid var(--border);
+  border-radius:var(--radius);
+  padding:16px;
+}
+
+label{display:block; font-size:11.5px; color:var(--text-dim); margin-bottom:4px; font-family:'JetBrains Mono',monospace;}
+input[type=text], input[type=number], select, textarea{
+  width:100%;
+  background:var(--panel-alt);
+  border:1px solid var(--border);
+  color:var(--text);
+  padding:8px 10px;
+  border-radius:4px;
+  font-family:'JetBrains Mono',monospace;
+  font-size:13px;
+  margin-bottom:12px;
+}
+input:focus, select:focus, textarea:focus{
+  outline:2px solid var(--accent-dim); outline-offset:0; border-color:var(--accent);
+}
+.row{display:flex; gap:8px;}
+.row > *{flex:1;}
+.check-row{display:flex; align-items:center; gap:8px; margin-bottom:10px; font-size:12.5px; color:var(--text-dim); font-family:'JetBrains Mono',monospace;}
+.check-row input{margin:0; width:auto;}
+
+button{
+  font-family:'Space Grotesk',sans-serif;
+  font-weight:600;
+  font-size:13px;
+  border-radius:4px;
+  border:1px solid var(--border);
+  background:var(--panel-alt);
+  color:var(--text);
+  padding:8px 12px;
+  cursor:pointer;
+  transition:border-color .15s, color .15s;
+}
+button:hover{border-color:var(--accent); color:var(--accent);}
+button.primary{
+  background:var(--accent); border-color:var(--accent); color:#04211d;
+}
+button.primary:hover{filter:brightness(1.08); color:#04211d;}
+button.danger{color:var(--danger); border-color:transparent; background:transparent; padding:4px 6px; font-size:12px;}
+button.danger:hover{border-color:var(--danger);}
+button.ghost{background:transparent;}
+button:disabled{opacity:.4; cursor:not-allowed;}
+button.small{padding:5px 9px; font-size:12px;}
+
+.peer-item{
+  display:flex; align-items:center; gap:8px;
+  padding:8px 0; border-bottom:1px solid var(--border-soft);
+}
+.peer-item:last-child{border-bottom:none;}
+.peer-item .dot{width:9px; height:9px; border-radius:50%; background:var(--accent); flex:none; box-shadow:0 0 6px var(--accent);}
+.peer-item .name{font-family:'JetBrains Mono',monospace; font-size:13px; flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+.peer-item .ep{font-size:11px; color:var(--text-faint); font-family:'JetBrains Mono',monospace;}
+
+.link-list{max-height:180px; overflow:auto; padding-right:4px;}
+.link-row{display:flex; align-items:center; gap:8px; font-size:12px; font-family:'JetBrains Mono',monospace; color:var(--text-dim); padding:5px 0;}
+.link-row input{margin:0; width:auto;}
+.link-row.disabled{color:var(--text-faint); text-decoration:line-through;}
+
+.override-item{
+  border:1px solid var(--border-soft); border-radius:4px; padding:8px 10px; margin-bottom:8px;
+  font-size:12px; font-family:'JetBrains Mono',monospace;
+  display:flex; justify-content:space-between; align-items:center; gap:8px;
+}
+.override-item .badge{
+  font-size:10px; text-transform:uppercase; letter-spacing:.5px;
+  padding:2px 6px; border-radius:3px; background:var(--accent-dim); color:var(--accent); flex:none;
+}
+.override-item .desc{flex:1; color:var(--text-dim); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+
+.tabs{display:flex; flex-wrap:wrap; gap:6px; margin-bottom:18px;}
+.tab{
+  padding:7px 14px; border:1px solid var(--border); border-radius:20px;
+  font-family:'JetBrains Mono',monospace; font-size:12.5px; cursor:pointer; color:var(--text-dim);
+  background:var(--panel);
+}
+.tab.active{border-color:var(--accent); color:var(--accent); background:var(--accent-dim);}
+
+.graph-wrap{
+  background:var(--panel); border:1px solid var(--border); border-radius:var(--radius);
+  padding:12px; margin-bottom:26px;
+}
+.graph-wrap h2{margin:0 0 4px; font-size:14px; letter-spacing:.3px;}
+.graph-wrap .hint{color:var(--text-faint); font-size:11.5px; margin:0 0 10px; font-family:'JetBrains Mono',monospace;}
+
+.peer-block{display:none;}
+.peer-block.active{display:block;}
+.peer-block-head{display:flex; align-items:center; justify-content:space-between; margin-bottom:14px; flex-wrap:wrap; gap:10px;}
+.peer-block-head h3{margin:0; font-size:16px;}
+.peer-block-head .actions{display:flex; gap:8px;}
+
+.iface-card{
+  background:var(--panel); border:1px solid var(--border); border-radius:var(--radius);
+  margin-bottom:16px; overflow:hidden;
+}
+.iface-head{
+  display:flex; align-items:center; justify-content:space-between; gap:10px;
+  padding:10px 14px; background:var(--panel-alt); border-bottom:1px solid var(--border);
+  font-family:'JetBrains Mono',monospace; font-size:12.5px;
+}
+.iface-head .name{color:var(--accent); font-weight:700;}
+.iface-head .meta{color:var(--text-faint);}
+.iface-body{padding:0;}
+pre.conf{
+  margin:0; padding:14px; font-family:'JetBrains Mono',monospace; font-size:12.5px;
+  color:var(--text); white-space:pre-wrap; word-break:break-all;
+}
+pre.conf .k{color:var(--text-faint);}
+pre.conf .v{color:var(--text);}
+pre.conf .priv{color:var(--key);}
+pre.conf .sec{color:var(--accent);}
+.iface-actions{display:flex; gap:8px; padding:10px 14px; border-top:1px solid var(--border-soft);}
+
+.empty{
+  color:var(--text-faint); font-family:'JetBrains Mono',monospace; font-size:13px;
+  padding:40px 10px; text-align:center; border:1px dashed var(--border); border-radius:var(--radius);
+}
+footer{
+  position:relative; z-index:1; padding:20px 32px 40px; color:var(--text-faint);
+  font-size:11.5px; font-family:'JetBrains Mono',monospace; border-top:1px solid var(--border); margin-top:20px;
+}
+footer a{color:var(--text-dim);}
+.toast{
+  position:fixed; bottom:18px; right:18px; background:var(--panel); border:1px solid var(--accent);
+  color:var(--accent); padding:9px 16px; border-radius:4px; font-family:'JetBrains Mono',monospace;
+  font-size:12.5px; opacity:0; transform:translateY(6px); transition:opacity .2s, transform .2s; z-index:50;
+}
+.toast.show{opacity:1; transform:translateY(0);}
+.edge-line{stroke:var(--border); stroke-width:1.5;}
+.edge-line.on{stroke:var(--accent); stroke-dasharray:4 4; animation:flow 1.2s linear infinite;}
+@keyframes flow{to{stroke-dashoffset:-8;}}
+.node-circle{fill:var(--panel-alt); stroke:var(--accent); stroke-width:1.5;}
+.node-label{fill:var(--text); font-family:'Space Grotesk',sans-serif; font-size:12px; font-weight:700; text-anchor:middle;}
+.edge-label{fill:var(--text-faint); font-family:'JetBrains Mono',monospace; font-size:9.5px; text-anchor:middle;}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="brand">
+    <h1>wg<span class="dot">·</span>mesh</h1>
+    <span class="tag">point-to-point WireGuard mesh config generator</span>
+  </div>
+  <div class="sub">keys generated in your browser · nothing leaves this page</div>
+</header>
+
+<div class="layout">
+  <aside class="sidebar">
+
+    <div>
+      <p class="section-label">Network settings</p>
+      <div class="card">
+        <label for="baseCidr">Base CIDR (sliced into /30 links)</label>
+        <input type="text" id="baseCidr" value="10.10.0.0/16">
+        <label for="basePort">Base ListenPort</label>
+        <input type="number" id="basePort" value="51820">
+        <div class="check-row">
+          <input type="checkbox" id="keepalive" checked>
+          <label for="keepalive" style="margin:0;">Include PersistentKeepalive = 25</label>
+        </div>
+        <button class="primary" id="btnGenerate" style="width:100%;">Generate mesh</button>
+      </div>
+    </div>
+
+    <div>
+      <p class="section-label">Peers <span class="n" id="peerCount">0</span></p>
+      <div class="card">
+        <div class="row">
+          <input type="text" id="peerName" placeholder="peer name (e.g. node-a)">
+        </div>
+        <input type="text" id="peerEndpoint" placeholder="public endpoint host (optional)">
+        <button id="btnAddPeer" style="width:100%;">+ Add peer</button>
+        <div id="peerList" style="margin-top:10px;"></div>
+      </div>
+    </div>
+
+    <div>
+      <p class="section-label">Links</p>
+      <div class="card">
+        <div class="link-list" id="linkList"></div>
+        <p class="hint" style="font-family:'JetBrains Mono',monospace; color:var(--text-faint); font-size:11px; margin:8px 0 0;">Uncheck a link to remove that connection from the mesh.</p>
+      </div>
+    </div>
+
+    <div>
+      <p class="section-label">Key overrides</p>
+      <div class="card">
+        <label for="ovType">Scope</label>
+        <select id="ovType">
+          <option value="peer">All interfaces of one peer</option>
+          <option value="link">One link (specific interface / both sides)</option>
+        </select>
+
+        <div id="ovPeerFields">
+          <label for="ovPeer">Peer</label>
+          <select id="ovPeer"></select>
+        </div>
+
+        <div id="ovLinkFields" style="display:none;">
+          <label for="ovLink">Link</label>
+          <select id="ovLink"></select>
+          <label for="ovSide">Side to override</label>
+          <select id="ovSide"></select>
+        </div>
+
+        <label for="ovKey">Private key (base64) — leave blank to auto-fill a new one</label>
+        <div class="row">
+          <input type="text" id="ovKey" placeholder="wg genkey output...">
+          <button class="small" id="btnOvGen" style="flex:none;">roll</button>
+        </div>
+        <button id="btnAddOverride" style="width:100%;">+ Add override</button>
+        <div id="overrideList" style="margin-top:12px;"></div>
+      </div>
+    </div>
+
+    <div>
+      <p class="section-label">Export</p>
+      <div class="card" style="display:flex; flex-direction:column; gap:8px;">
+        <button id="btnZipAll">Download all configs (.zip)</button>
+        <button id="btnRerollAuto" class="ghost">Re-roll auto-generated keys</button>
+      </div>
+    </div>
+
+  </aside>
+
+  <main>
+    <div class="graph-wrap">
+      <h2>Mesh topology</h2>
+      <p class="hint">Each edge is one dedicated /30 link — every peer runs one WireGuard interface per edge it takes part in.</p>
+      <div id="graphHost"></div>
+    </div>
+
+    <div class="tabs" id="peerTabs"></div>
+    <div id="peerBlocks"></div>
+    <div id="emptyState" class="empty">Add at least two peers and click "Generate mesh" to build configs.</div>
+  </main>
+</div>
+
+<footer>
+  Runs entirely client-side (TweetNaCl for X25519 keypairs, matching <span class="mono">wg genkey</span>/<span class="mono">wg pubkey</span> output). Publish this file as <span class="mono">index.html</span> on a GitHub Pages branch to host it. No data is transmitted anywhere.
+</footer>
+
+<div class="toast" id="toast"></div>
+
+<script>
+(function(){
+"use strict";
+
+/* ---------- base64 / key helpers ---------- */
+function toB64(bytes){ let s=''; for(let i=0;i<bytes.length;i++) s+=String.fromCharCode(bytes[i]); return btoa(s); }
+function fromB64(str){ const bin=atob(str.trim()); const out=new Uint8Array(bin.length); for(let i=0;i<bin.length;i++) out[i]=bin.charCodeAt(i); return out; }
+
+function genKeyPair(){
+  const priv = nacl.randomBytes(32);
+  priv[0] &= 248; priv[31] &= 127; priv[31] |= 64; // clamp, matches wg genkey output
+  const pub = nacl.scalarMult.base(priv);
+  return { privateKey: toB64(priv), publicKey: toB64(pub) };
+}
+function pubFromPriv(privB64){
+  try{
+    const priv = fromB64(privB64);
+    if(priv.length !== 32) return null;
+    return toB64(nacl.scalarMult.base(priv));
+  }catch(e){ return null; }
+}
+
+/* ---------- IP helpers ---------- */
+function ipToInt(ip){ const p=ip.split('.').map(Number); return ((p[0]<<24)>>>0)+(p[1]<<16)+(p[2]<<8)+p[3]; }
+function intToIp(n){ return [(n>>>24)&255,(n>>>16)&255,(n>>>8)&255,n&255].join('.'); }
+function parseCidr(cidr){
+  const [ip, len] = cidr.split('/');
+  return { base: ipToInt(ip), prefix: parseInt(len,10) };
+}
+
+/* ---------- state ---------- */
+let peers = []; // {id, name, endpoint}
+let peerSeq = 0;
+let disabledLinks = new Set(); // linkKey
+let peerOverrides = {};        // peerId -> privateKey (b64)
+let linkOverrides = {};        // linkKey -> { [peerId]: privateKey }
+let generatedKeys = {};        // cacheKey -> {privateKey, publicKey}
+let lastBuild = null;          // cached render output
+
+function linkKey(a,b){ return [a,b].sort().join('__'); }
+function sideKeyCache(peerId, lk){ return peerId + '@' + lk; }
+
+function toast(msg){
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.classList.add('show');
+  clearTimeout(toast._t);
+  toast._t = setTimeout(()=>t.classList.remove('show'), 1600);
+}
+
+/* ---------- demo seed ---------- */
+function seedDemo(){
+  peers = [
+    { id:'p'+(++peerSeq), name:'node-a', endpoint:'node-a.example.net' },
+    { id:'p'+(++peerSeq), name:'node-b', endpoint:'node-b.example.net' },
+    { id:'p'+(++peerSeq), name:'node-c', endpoint:'' },
+  ];
+}
+seedDemo();
+
+/* ---------- peer management ---------- */
+function addPeer(){
+  const nameEl = document.getElementById('peerName');
+  const epEl = document.getElementById('peerEndpoint');
+  const name = nameEl.value.trim();
+  if(!name){ toast('Give the peer a name'); return; }
+  if(peers.some(p=>p.name===name)){ toast('Peer name already used'); return; }
+  peers.push({ id:'p'+(++peerSeq), name, endpoint: epEl.value.trim() });
+  nameEl.value=''; epEl.value='';
+  renderSidebar();
+}
+function removePeer(id){
+  peers = peers.filter(p=>p.id!==id);
+  delete peerOverrides[id];
+  Object.keys(linkOverrides).forEach(lk=>{
+    if(lk.includes(id)) delete linkOverrides[lk];
+  });
+  renderSidebar();
+}
+
+/* ---------- links ---------- */
+function allLinks(){
+  const out=[];
+  for(let i=0;i<peers.length;i++){
+    for(let j=i+1;j<peers.length;j++){
+      out.push({ a:peers[i].id, b:peers[j].id, key:linkKey(peers[i].id,peers[j].id) });
+    }
+  }
+  return out;
+}
+function enabledLinks(){ return allLinks().filter(l=>!disabledLinks.has(l.key)); }
+
+/* ---------- sidebar rendering ---------- */
+function renderSidebar(){
+  document.getElementById('peerCount').textContent = peers.length;
+
+  const list = document.getElementById('peerList');
+  list.innerHTML = '';
+  peers.forEach(p=>{
+    const row = document.createElement('div');
+    row.className='peer-item';
+    row.innerHTML = `<span class="dot"></span><span class="name" title="${p.name}">${p.name}</span>
+      <span class="ep">${p.endpoint?p.endpoint:'no endpoint'}</span>`;
+    const rm = document.createElement('button');
+    rm.className='danger'; rm.textContent='✕';
+    rm.onclick=()=>removePeer(p.id);
+    row.appendChild(rm);
+    list.appendChild(row);
+  });
+
+  const linkList = document.getElementById('linkList');
+  linkList.innerHTML = '';
+  const links = allLinks();
+  if(links.length===0){
+    linkList.innerHTML = '<div style="color:var(--text-faint); font-size:12px;">No links yet — add 2+ peers.</div>';
+  }
+  links.forEach(l=>{
+    const pa = peers.find(p=>p.id===l.a), pb = peers.find(p=>p.id===l.b);
+    const row = document.createElement('label');
+    row.className = 'link-row' + (disabledLinks.has(l.key) ? ' disabled':'');
+    row.style.cursor='pointer';
+    row.innerHTML = `<input type="checkbox" ${disabledLinks.has(l.key)?'':'checked'} data-lk="${l.key}"> ${pa.name} ↔ ${pb.name}`;
+    row.querySelector('input').onchange = (e)=>{
+      if(e.target.checked) disabledLinks.delete(l.key); else disabledLinks.add(l.key);
+      renderSidebar();
+    };
+    linkList.appendChild(row);
+  });
+
+  // override target selects
+  const ovPeer = document.getElementById('ovPeer');
+  ovPeer.innerHTML = peers.map(p=>`<option value="${p.id}">${p.name}</option>`).join('');
+
+  const ovLink = document.getElementById('ovLink');
+  ovLink.innerHTML = links.map(l=>{
+    const pa=peers.find(p=>p.id===l.a), pb=peers.find(p=>p.id===l.b);
+    return `<option value="${l.key}" data-a="${l.a}" data-b="${l.b}">${pa.name} ↔ ${pb.name}</option>`;
+  }).join('');
+  updateOvSideOptions();
+
+  renderOverrideList();
+}
+
+function updateOvSideOptions(){
+  const ovLink = document.getElementById('ovLink');
+  const ovSide = document.getElementById('ovSide');
+  const opt = ovLink.selectedOptions[0];
+  if(!opt){ ovSide.innerHTML=''; return; }
+  const a = opt.dataset.a, b = opt.dataset.b;
+  const pa = peers.find(p=>p.id===a), pb = peers.find(p=>p.id===b);
+  ovSide.innerHTML = `
+    <option value="${a}">${pa?pa.name:'?'} side only</option>
+    <option value="${b}">${pb?pb.name:'?'} side only</option>
+    <option value="both">both sides</option>`;
+}
+document.getElementById('ovLink').addEventListener('change', updateOvSideOptions);
+document.getElementById('ovType').addEventListener('change', (e)=>{
+  document.getElementById('ovPeerFields').style.display = e.target.value==='peer' ? '' : 'none';
+  document.getElementById('ovLinkFields').style.display = e.target.value==='link' ? '' : 'none';
+});
+
+function renderOverrideList(){
+  const host = document.getElementById('overrideList');
+  host.innerHTML='';
+  Object.entries(peerOverrides).forEach(([pid, priv])=>{
+    const p = peers.find(x=>x.id===pid);
+    const el = document.createElement('div');
+    el.className='override-item';
+    el.innerHTML = `<span class="badge">peer</span><span class="desc" title="${priv}">${p?p.name:pid} — all interfaces</span>`;
+    const rm = document.createElement('button'); rm.className='danger'; rm.textContent='✕';
+    rm.onclick=()=>{ delete peerOverrides[pid]; renderOverrideList(); };
+    el.appendChild(rm);
+    host.appendChild(el);
+  });
+  Object.entries(linkOverrides).forEach(([lk, sides])=>{
+    const [ida, idb] = lk.split('__');
+    const pa = peers.find(p=>p.id===ida), pb = peers.find(p=>p.id===idb);
+    Object.entries(sides).forEach(([pid, priv])=>{
+      const p = peers.find(x=>x.id===pid);
+      const el = document.createElement('div');
+      el.className='override-item';
+      el.innerHTML = `<span class="badge">link</span><span class="desc" title="${priv}">${pa?pa.name:'?'} ↔ ${pb?pb.name:'?'} — ${p?p.name:pid} side</span>`;
+      const rm = document.createElement('button'); rm.className='danger'; rm.textContent='✕';
+      rm.onclick=()=>{ delete linkOverrides[lk][pid]; if(Object.keys(linkOverrides[lk]).length===0) delete linkOverrides[lk]; renderOverrideList(); };
+      el.appendChild(rm);
+      host.appendChild(el);
+    });
+  });
+  if(host.children.length===0){
+    host.innerHTML = '<div style="color:var(--text-faint); font-size:12px;">No overrides — every interface gets a freshly generated keypair.</div>';
+  }
+}
+
+document.getElementById('btnAddPeer').onclick = addPeer;
+document.getElementById('btnOvGen').onclick = ()=>{ document.getElementById('ovKey').value = genKeyPair().privateKey; };
+
+document.getElementById('btnAddOverride').onclick = ()=>{
+  const type = document.getElementById('ovType').value;
+  let key = document.getElementById('ovKey').value.trim();
+  if(key && !pubFromPriv(key)){ toast('That private key does not look valid (need 32 raw bytes, base64)'); return; }
+  if(!key) key = genKeyPair().privateKey;
+
+  if(type==='peer'){
+    const pid = document.getElementById('ovPeer').value;
+    if(!pid){ toast('Add a peer first'); return; }
+    peerOverrides[pid] = key;
+  } else {
+    const lk = document.getElementById('ovLink').value;
+    const side = document.getElementById('ovSide').value;
+    if(!lk){ toast('No link available'); return; }
+    const [ida, idb] = lk.split('__');
+    linkOverrides[lk] = linkOverrides[lk] || {};
+    if(side==='both'){
+      linkOverrides[lk][ida] = key;
+      linkOverrides[lk][idb] = genKeyPair().privateKey; // distinct key for the other side by default
+    } else {
+      linkOverrides[lk][side] = key;
+    }
+  }
+  document.getElementById('ovKey').value='';
+  renderOverrideList();
+  toast('Override added');
+};
+
+/* ---------- key resolution ---------- */
+function resolveKey(peerId, lk){
+  if(linkOverrides[lk] && linkOverrides[lk][peerId]){
+    const priv = linkOverrides[lk][peerId];
+    return { privateKey: priv, publicKey: pubFromPriv(priv) };
+  }
+  if(peerOverrides[peerId]){
+    const priv = peerOverrides[peerId];
+    return { privateKey: priv, publicKey: pubFromPriv(priv) };
+  }
+  const cacheKey = sideKeyCache(peerId, lk);
+  if(!generatedKeys[cacheKey]) generatedKeys[cacheKey] = genKeyPair();
+  return generatedKeys[cacheKey];
+}
+
+/* ---------- build ---------- */
+function sanitizeName(n){ return n.replace(/[^a-zA-Z0-9_-]+/g,'_'); }
+
+function build(){
+  const cidrStr = document.getElementById('baseCidr').value.trim();
+  const basePort = parseInt(document.getElementById('basePort').value,10) || 51820;
+  const keepalive = document.getElementById('keepalive').checked;
+
+  let cidr;
+  try{ cidr = parseCidr(cidrStr); if(isNaN(cidr.base)) throw 0; }
+  catch(e){ toast('Invalid base CIDR'); return null; }
+
+  const links = enabledLinks();
+  const maxLinks = Math.pow(2, 32 - cidr.prefix) / 4;
+  if(links.length > maxLinks){ toast('Base CIDR is too small for this many links'); return null; }
+
+  // subnet assignment, stable by link key order (insertion order of peers)
+  const subnets = {};
+  links.forEach((l, idx)=>{
+    const net = cidr.base + idx*4;
+    subnets[l.key] = { aIp: intToIp(net+1), bIp: intToIp(net+2), cidr: intToIp(net)+'/30' };
+  });
+
+  // per-peer interface list + ports
+  const byPeer = {}; // peerId -> [{otherId, lk, ifaceIdx, port}]
+  peers.forEach(p=> byPeer[p.id]=[]);
+  links.forEach(l=>{
+    byPeer[l.a].push({ other:l.b, lk:l.key });
+    byPeer[l.b].push({ other:l.a, lk:l.key });
+  });
+  Object.keys(byPeer).forEach(pid=>{
+    byPeer[pid].forEach((entry, idx)=>{
+      entry.ifaceIdx = idx;
+      entry.ifaceName = 'wg'+idx;
+      entry.port = basePort + idx;
+    });
+  });
+
+  // resolve all keys first
+  const keys = {}; // `${peerId}@${lk}` -> {privateKey, publicKey}
+  links.forEach(l=>{
+    keys[sideKeyCache(l.a,l.key)] = resolveKey(l.a, l.key);
+    keys[sideKeyCache(l.b,l.key)] = resolveKey(l.b, l.key);
+  });
+
+  // build configs grouped by peer
+  const configsByPeer = {};
+  peers.forEach(p=>{
+    configsByPeer[p.id] = byPeer[p.id].map(entry=>{
+      const otherPeer = peers.find(x=>x.id===entry.other);
+      const mine = keys[sideKeyCache(p.id, entry.lk)];
+      const theirs = keys[sideKeyCache(entry.other, entry.lk)];
+      const sn = subnets[entry.lk];
+      const myIp = (subnetSide(entry.lk, p.id)==='a') ? sn.aIp : sn.bIp;
+      const theirIp = (subnetSide(entry.lk, p.id)==='a') ? sn.bIp : sn.aIp;
+
+      let lines = [];
+      lines.push('[Interface]');
+      lines.push(`PrivateKey = ${mine.privateKey}`);
+      lines.push(`Address = ${myIp}/30`);
+      lines.push(`ListenPort = ${entry.port}`);
+      lines.push('');
+      lines.push('[Peer]');
+      lines.push(`PublicKey = ${theirs.publicKey}`);
+      lines.push(`AllowedIPs = ${theirIp}/32`);
+      if(otherPeer.endpoint){
+        const otherEntry = byPeer[entry.other].find(e=>e.lk===entry.lk);
+        lines.push(`Endpoint = ${otherPeer.endpoint}:${otherEntry.port}`);
+      }
+      if(keepalive) lines.push('PersistentKeepalive = 25');
+
+      return {
+        ifaceName: entry.ifaceName,
+        otherName: otherPeer.name,
+        port: entry.port,
+        cidr: sn.cidr,
+        filename: `${sanitizeName(p.name)}-${entry.ifaceName}.conf`,
+        content: lines.join('\n') + '\n',
+        publicKey: mine.publicKey
+      };
+    });
+  });
+
+  return { links, subnets, byPeer, configsByPeer };
+}
+function subnetSide(lk, peerId){
+  const [a,b] = lk.split('__');
+  return peerId===a ? 'a' : 'b';
+}
+
+/* ---------- rendering: graph ---------- */
+function renderGraph(built){
+  const host = document.getElementById('graphHost');
+  if(!built || peers.length===0){
+    host.innerHTML = '<div class="empty">No peers yet.</div>';
+    return;
+  }
+  const W=680,H=440,cx=W/2,cy=H/2-10,R=Math.min(W,H)/2-90;
+  const pos = {};
+  peers.forEach((p,i)=>{
+    const angle = (2*Math.PI*i/peers.length) - Math.PI/2;
+    pos[p.id] = { x: cx+R*Math.cos(angle), y: cy+R*Math.sin(angle) };
+  });
+
+  let svg = `<svg viewBox="0 0 ${W} ${H}" width="100%" style="max-width:100%; height:auto;">`;
+  // edges
+  built.links.forEach(l=>{
+    const pa=pos[l.a], pb=pos[l.b];
+    const sn = built.subnets[l.key];
+    const mx=(pa.x+pb.x)/2, my=(pa.y+pb.y)/2;
+    svg += `<line class="edge-line on" x1="${pa.x}" y1="${pa.y}" x2="${pb.x}" y2="${pb.y}"><title>${sn.cidr}</title></line>`;
+    svg += `<rect x="${mx-30}" y="${my-8}" width="60" height="14" fill="var(--bg)" opacity="0.001"></rect>`;
+    svg += `<text class="edge-label" x="${mx}" y="${my-4}">${sn.cidr}</text>`;
+  });
+  // nodes
+  peers.forEach(p=>{
+    const c=pos[p.id];
+    const ifaceCount = (built.byPeer[p.id]||[]).length;
+    svg += `<circle class="node-circle" cx="${c.x}" cy="${c.y}" r="30"><title>${p.name} — ${ifaceCount} interface(s)${p.endpoint? ' — '+p.endpoint:''}</title></circle>`;
+    svg += `<text class="node-label" x="${c.x}" y="${c.y+4}">${p.name.length>10? p.name.slice(0,9)+'…':p.name}</text>`;
+  });
+  svg += `</svg>`;
+  host.innerHTML = svg;
+}
+
+/* ---------- rendering: configs ---------- */
+let activePeerId = null;
+function renderConfigs(built){
+  const tabs = document.getElementById('peerTabs');
+  const blocks = document.getElementById('peerBlocks');
+  const empty = document.getElementById('emptyState');
+  tabs.innerHTML=''; blocks.innerHTML='';
+
+  if(!built || peers.length < 2 || built.links.length===0){
+    empty.style.display='block';
+    return;
+  }
+  empty.style.display='none';
+
+  if(!activePeerId || !peers.some(p=>p.id===activePeerId)) activePeerId = peers[0].id;
+
+  peers.forEach(p=>{
+    const tab = document.createElement('div');
+    tab.className = 'tab' + (p.id===activePeerId?' active':'');
+    tab.textContent = p.name;
+    tab.onclick = ()=>{ activePeerId=p.id; renderConfigs(lastBuild); };
+    tabs.appendChild(tab);
+
+    const block = document.createElement('div');
+    block.className = 'peer-block' + (p.id===activePeerId?' active':'');
+    const confs = built.configsByPeer[p.id] || [];
+
+    let head = document.createElement('div');
+    head.className='peer-block-head';
+    head.innerHTML = `<h3>${p.name} <span style="color:var(--text-faint); font-size:12px; font-family:'JetBrains Mono',monospace;">— ${confs.length} interface(s)</span></h3>`;
+    const actions = document.createElement('div'); actions.className='actions';
+    const zipBtn = document.createElement('button'); zipBtn.className='small'; zipBtn.textContent='Download peer .zip';
+    zipBtn.onclick = ()=>downloadPeerZip(p, confs);
+    actions.appendChild(zipBtn);
+    head.appendChild(actions);
+    block.appendChild(head);
+
+    if(confs.length===0){
+      const e = document.createElement('div'); e.className='empty'; e.textContent='This peer has no active links.';
+      block.appendChild(e);
+    }
+
+    confs.forEach(c=>{
+      const card = document.createElement('div'); card.className='iface-card';
+      card.innerHTML = `
+        <div class="iface-head">
+          <span><span class="name">${c.ifaceName}</span> <span class="meta">→ ${c.otherName} · ${c.cidr} · port ${c.port}</span></span>
+        </div>
+        <div class="iface-body"><pre class="conf">${escapeHtml(c.content)}</pre></div>
+        <div class="iface-actions">
+          <button class="small copy-btn">Copy config</button>
+          <button class="small dl-btn">Download ${c.filename}</button>
+        </div>`;
+      card.querySelector('.copy-btn').onclick = ()=>{
+        navigator.clipboard.writeText(c.content).then(()=>toast('Copied '+c.filename));
+      };
+      card.querySelector('.dl-btn').onclick = ()=>downloadText(c.filename, c.content);
+      block.appendChild(card);
+    });
+
+    blocks.appendChild(block);
+  });
+}
+function escapeHtml(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+/* ---------- downloads ---------- */
+function downloadText(filename, content){
+  const blob = new Blob([content], {type:'text/plain'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href=url; a.download=filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+}
+function downloadPeerZip(peer, confs){
+  const zip = new JSZip();
+  const folder = zip.folder(sanitizeName(peer.name));
+  confs.forEach(c=>folder.file(c.filename, c.content));
+  zip.generateAsync({type:'blob'}).then(blob=>{
+    const url = URL.createObjectURL(blob);
+    const a=document.createElement('a'); a.href=url; a.download=`${sanitizeName(peer.name)}-wireguard-configs.zip`;
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+  });
+}
+document.getElementById('btnZipAll').onclick = ()=>{
+  if(!lastBuild){ toast('Generate the mesh first'); return; }
+  const zip = new JSZip();
+  peers.forEach(p=>{
+    const folder = zip.folder(sanitizeName(p.name));
+    (lastBuild.configsByPeer[p.id]||[]).forEach(c=>folder.file(c.filename, c.content));
+  });
+  zip.generateAsync({type:'blob'}).then(blob=>{
+    const url = URL.createObjectURL(blob);
+    const a=document.createElement('a'); a.href=url; a.download='wireguard-mesh-configs.zip';
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+  });
+};
+document.getElementById('btnRerollAuto').onclick = ()=>{
+  generatedKeys = {};
+  refresh();
+  toast('Auto-generated keys re-rolled');
+};
+
+/* ---------- main refresh ---------- */
+function refresh(){
+  const built = build();
+  lastBuild = built;
+  renderGraph(built);
+  renderConfigs(built);
+}
+document.getElementById('btnGenerate').onclick = refresh;
+
+/* init */
+renderSidebar();
+refresh();
+
+})();
+</script>
+</body>
+</html>
