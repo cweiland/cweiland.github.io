@@ -46,19 +46,18 @@ wireguard_node: node-a
 	endpoint node-a.example.net
 	role internal
 	interfaces name=wg0,listen_port=51820,public_key=...,ip=10.10.0.1/30 name=wg1,listen_port=51821,public_key=...,ip=10.10.0.9/30
+	peers node=node-b,iface=wg0,type=internal,node_iface=wg0 node=node-c,iface=wg1,type=internal,node_iface=wg0
 ```
 
-Two things are deliberately **not** generated:
+Only one thing is deliberately **not** generated:
 
 - **Private keys.** Proxmox keeps those in `/etc/pve/priv/wg-keys.cfg` and writes
   that file itself when you save an interface in the GUI. Paste this tool's
   private keys in there instead of trying to hand-edit that file.
-- **Per-interface peer selection.** In the Proxmox GUI you pick, per interface,
-  which other node/interface it peers with, and Proxmox derives AllowedIPs/
-  Endpoint/PublicKey from that node's own config automatically. The raw on-disk
-  syntax for that link wasn't stable/documented enough at the time this tool was
-  built to generate blind — better to wire it up in Datacenter → SDN → Fabrics
-  than risk a `fabrics.cfg` that fails to parse.
+
+Per-interface peer wiring (the `peers` line above) **is** generated automatically —
+its shape is confirmed against Proxmox's own API schema (`PVE::RESTHandler::api_dump
+('PVE::API2')`, cross-checked against a real cluster), not guessed.
 
 This feature is very new (shipped in PVE 9.2, itself only weeks old at the time
 of writing) — double-check the generated snippet against your exact Proxmox VE
@@ -67,20 +66,20 @@ version before applying it.
 ### Talking to the Proxmox API directly (experimental)
 
 The same panel can also call the Proxmox API from your browser instead of
-copy-pasting a snippet:
+copy-pasting a snippet. Endpoints and field names below are confirmed against the
+real Proxmox VE SDN Fabrics API schema:
 
-- **Test connection** — `GET /api2/json/version`. Confirmed stable across
-  versions; a good way to check the host/token/CORS/certificate combo works
-  before trying anything else.
-- **Fetch existing fabrics** — `GET /api2/json/cluster/sdn/fabrics` (path is
-  overridable in the "Fabrics API path" field). Shows the raw JSON rather than
-  silently re-mapping it into the peer editor, since the exact field layout for
-  WireGuard fabrics is still settling between Proxmox point releases.
-- **Push this mesh to a fabric** — creates the fabric, then one request per
-  peer with its `interfaces` property string, then `PUT /api2/json/cluster/sdn`
-  to apply pending changes. The create-fabric call and the final apply call are
-  both confirmed/stable API endpoints; the per-node/interface path is this
-  tool's best guess and may need adjusting for your version. **Dry run is on by
+- **Test connection** — `GET /api2/json/version`. A good way to check the
+  host/token/CORS/certificate combo works before trying anything else.
+- **Fetch existing fabrics** — `GET /api2/json/cluster/sdn/fabrics/fabric` (base
+  path overridable in the "Fabrics API path" field). Shows the raw JSON rather
+  than silently re-mapping it into the peer editor.
+- **Push this mesh to a fabric** — `POST .../fabrics/fabric` with `{id, protocol,
+  persistent_keepalive}` to create the fabric, then one `POST
+  .../fabrics/node/{fabric_id}` per peer with `node_id`, the required `protocol`,
+  an `interfaces` array, and a generated `peers` array wiring each interface to
+  the matching interface on the other node — then a final `PUT
+  /api2/json/cluster/sdn` to apply pending changes. **Dry run is on by
   default** — it prints the exact requests without sending them so you can
   check them first.
 
@@ -96,33 +95,9 @@ time:
   for an arbitrary page's origin (like a `github.io` URL), so the browser may
   block the response even though the request reaches Proxmox. Serving this page
   from the same host/origin as Proxmox, or from a reverse proxy in front of it
-  that adds permissive CORS headers for this purpose, avoids that.
-
-## Talking to the Proxmox API directly
-
-A "Via the Proxmox API (experimental)" block sits under the fabrics.cfg panel:
-
-- **Test connection** — `GET /api2/json/version` with your API token.
-- **Fetch existing fabrics** — `GET /api2/json/cluster/sdn/fabrics`, shown as raw JSON
-  (deliberately not remapped into the mesh editor — the WireGuard fabric field layout
-  is still settling between Proxmox point releases).
-- **Push this mesh to a fabric** — builds one `POST` per node plus a final
-  `PUT /api2/json/cluster/sdn` to apply, and **defaults to dry run**, printing the
-  requests instead of sending them, since only the fabric-create and the final apply
-  call are confirmed-stable endpoints; the per-node/interface path is newer and worth
-  checking against your version's API viewer first.
-
-Two things will commonly block this before you even get to the endpoint question:
-
-1. **Self-signed certificate.** Open `https://your-host:8006` in a tab once and accept
-   the certificate, or the browser silently fails the `fetch()`.
-2. **CORS.** Proxmox's API (`pveproxy`) doesn't send `Access-Control-Allow-Origin` for
-   an arbitrary origin like a `github.io` page by default, so the browser will block
-   the request even with a correct token. This works if you host this same `index.html`
-   on the same origin as the API (e.g. drop it in `/usr/share/pve-manager/` or serve it
-   from something on the same host/port), or if you put a CORS-friendly reverse proxy
-   in front of Proxmox. If neither is an option, use the generated `fabrics.cfg` snippet
-   above instead and finish the wiring in the GUI — no browser networking involved.
+  that adds permissive CORS headers for this purpose, avoids that. If neither is
+  an option, use the generated `fabrics.cfg` snippet above instead and finish the
+  wiring in the GUI — no browser networking involved.
 
 ## Layout
 
@@ -190,11 +165,19 @@ Settings → Proxmox API now has a 4-step flow:
 1. Fill in host, token, and (if needed) the fabrics API path.
 2. **List WireGuard fabrics** — fetches all fabrics on the cluster and keeps
    the WireGuard ones.
-3. Pick one from the dropdown that appears.
-4. **Import selected fabric** — fetches that fabric's nodes and rebuilds
-   peers + links in the tool by pairing up interfaces that share the same
-   /30 (works without needing the not-yet-stable "peers" field). This
-   replaces whatever's currently in Nodes/Custom, after a confirmation.
+3. Pick one from the dropdown that appears. A short note underneath (`GET`,
+   read-only) says whether it's already a pure point-to-point mesh or not —
+   and if not, why (e.g. an interface with more than one peer, a subnet wider
+   than `/30`, or no peer data to read topology from).
+4. **Import selected fabric** — rebuilds peers + links in the tool from each
+   node's `peers` field, the source of truth for topology. Anything that
+   isn't already point-to-point (a hub interface fanned out to several
+   `[Peer]`s, wider subnets) is simplified to one link per peer relationship,
+   since interface names/ports/subnets are always regenerated fresh rather
+   than reused. Older fabrics with no `peers` data fall back to pairing up
+   interfaces that share the same `/30`. This replaces whatever's currently in
+   Nodes/Custom, after a confirmation — nothing on Proxmox is ever changed by
+   import.
 
 Proxmox never exposes private keys through its API (they live in
 `/etc/pve/priv/wg-keys.cfg`), so import can't recover the exact keys already

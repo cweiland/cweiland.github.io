@@ -235,6 +235,8 @@ label .tip{margin-left:5px;}
 .tab.active{border-color:var(--accent-bright); color:var(--accent); background:var(--accent-dim); font-weight:600;}
 
 .hint{color:var(--text-faint); font-size:12.5px; line-height:1.55; margin:8px 0 0; font-family:'JetBrains Mono',monospace;}
+.hint.hint-ok{color:var(--ok);}
+.hint.hint-warn{color:var(--key);}
 
 /* ---- alert / status boxes ---- */
 .alert-box{
@@ -559,6 +561,7 @@ footer a{color:var(--text-dim);}
         <div id="pveImportRow" style="display:none; margin-top:12px;">
           <label for="pveFabricSelect">Fabric to import</label>
           <select id="pveFabricSelect"></select>
+          <p class="hint" id="pveFabricCompliance"></p>
           <button id="btnPveImport" style="width:100%;">Import selected fabric</button>
         </div>
 
@@ -901,6 +904,9 @@ function resolveKey(peerId, lk){
 
 /* ---------- build ---------- */
 function sanitizeName(n){ return n.replace(/[^a-zA-Z0-9_-]+/g,'_'); }
+// Proxmox node identifiers use the hostname-like "pve-node" format (letters/digits/hyphens,
+// no underscores) — distinct from sanitizeName() above, which is only for local .conf filenames.
+function sanitizeNodeId(n){ return n.replace(/[^a-zA-Z0-9-]+/g,'-').replace(/^-+|-+$/g,''); }
 
 function build(){
   hideStatus('customError');
@@ -956,6 +962,8 @@ function build(){
       const myIp = (subnetSide(entry.lk, p.id)==='a') ? sn.aIp : sn.bIp;
       const theirIp = (subnetSide(entry.lk, p.id)==='a') ? sn.bIp : sn.aIp;
 
+      const otherEntry = byPeer[entry.other].find(e=>e.lk===entry.lk);
+
       let lines = [];
       lines.push('[Interface]');
       lines.push(`PrivateKey = ${mine.privateKey}`);
@@ -966,7 +974,6 @@ function build(){
       lines.push(`PublicKey = ${theirs.publicKey}`);
       lines.push(`AllowedIPs = ${theirIp}/32`);
       if(otherPeer.endpoint){
-        const otherEntry = byPeer[entry.other].find(e=>e.lk===entry.lk);
         lines.push(`Endpoint = ${otherPeer.endpoint}:${otherEntry.port}`);
       }
       if(keepalive) lines.push('PersistentKeepalive = 25');
@@ -974,6 +981,7 @@ function build(){
       return {
         ifaceName: entry.ifaceName,
         otherName: otherPeer.name,
+        otherIfaceName: otherEntry.ifaceName,
         port: entry.port,
         cidr: sn.cidr,
         filename: `${sanitizeName(p.name)}-${entry.ifaceName}.conf`,
@@ -1282,6 +1290,21 @@ document.getElementById('btnRerollAuto').onclick = ()=>{
 };
 
 /* ---------- Proxmox VE SDN fabric (WireGuard) export ---------- */
+// Shared by the fabrics.cfg snippet and the API push: one peer-wiring string per
+// interface, so Proxmox derives AllowedIPs/Endpoint/PublicKey from the referenced
+// node/interface instead of needing them repeated here.
+function buildPeerStrings(confs, internal){
+  return confs.map(c=>{
+    const parts = [
+      `node=${sanitizeNodeId(c.otherName)}`,
+      `iface=${c.ifaceName}`,
+      `type=${internal ? 'internal' : 'external'}`,
+      `node_iface=${c.otherIfaceName}`
+    ];
+    return parts.join(',');
+  });
+}
+
 function buildPveFabricConfig(built){
   if(!built) return null;
   const nameRaw = document.getElementById('pveFabricName').value.trim() || 'wgmesh';
@@ -1309,18 +1332,19 @@ function buildPveFabricConfig(built){
       if(m) parts.push(`ip=${m[1]}`);
       return parts.join(',');
     });
-    out.push(`wireguard_node: ${sanitizeName(p.name)}`);
+    const peerStrs = buildPeerStrings(confs, internal);
+    out.push(`wireguard_node: ${sanitizeNodeId(p.name)}`);
     if(p.endpoint) out.push(`\tendpoint ${p.endpoint}`);
     out.push(`\trole ${internal ? 'internal' : 'external'}`);
     out.push(`\tinterfaces ${ifaceStrs.join(' ')}`);
+    out.push(`\tpeers ${peerStrs.join(' ')}`);
     out.push('');
   });
 
   out.push(`# Next steps in the GUI:`);
   out.push(`# 1. Datacenter -> SDN -> Fabrics -> Create -> WireGuard, name it "${name}".`);
-  out.push(`# 2. Add each node above, create its interface(s) with the listen port / IP shown,`);
-  out.push(`#    and for each interface select the matching peer(s) from the other nodes —`);
-  out.push(`#    Proxmox will fill in AllowedIPs/Endpoint/PublicKey for you from their config.`);
+  out.push(`# 2. Add each node above with its interface(s) and peers exactly as listed —`);
+  out.push(`#    Proxmox fills in AllowedIPs/Endpoint/PublicKey from the referenced node/interface.`);
   out.push(`# 3. Apply the pending SDN changes.`);
 
   return out.join('\n') + '\n';
@@ -1401,7 +1425,15 @@ async function pveRequest(method, path, body){
   if(body){
     headers['Content-Type'] = 'application/x-www-form-urlencoded';
     const params = new URLSearchParams();
-    Object.entries(body).forEach(([k,v])=>{ if(v!==undefined && v!==null && v!=='') params.append(k, v); });
+    Object.entries(body).forEach(([k,v])=>{
+      if(v===undefined || v===null || v==='') return;
+      if(Array.isArray(v)){
+        // PVE's array-type parameters are sent as repeated same-name form fields.
+        v.forEach(item=>{ if(item!==undefined && item!==null && item!=='') params.append(k, item); });
+      } else {
+        params.append(k, v);
+      }
+    });
     fetchOpts.body = params.toString();
   }
   let res;
@@ -1447,10 +1479,12 @@ document.getElementById('btnPveTest').onclick = function(){
 
 /* ---------- fabric list / select / import ---------- */
 let fetchedFabrics = []; // raw fabric objects from the API
+let fetchedNodesCache = {}; // fabricId -> raw node-list response, shared by compliance check + import
 
-function parseInterfacesString(str){
-  if(!str) return [];
-  return str.trim().split(/\s+/).filter(Boolean).map(chunk=>{
+function parsePropertyStringList(val){
+  if(!val) return [];
+  const arr = Array.isArray(val) ? val : String(val).trim().split(/\s+/).filter(Boolean);
+  return arr.map(chunk=>{
     const obj = {};
     chunk.split(',').forEach(kv=>{
       const idx = kv.indexOf('=');
@@ -1460,32 +1494,123 @@ function parseInterfacesString(str){
   });
 }
 
-// Reconstructs peers + link topology from a fabric's node list by pairing
-// up interfaces that share the same /30 network — this works without
-// needing the (still-unconfirmed) raw "peers" field, and doesn't require
-// private keys, which Proxmox never exposes via the API anyway.
+// Reconstructs peers + link topology from a fabric's node list.
+//
+// Primary source: each node's confirmed `peers[]` entries (node=<other node id>,...).
+// Iterating every peers[] entry independently — regardless of which local `iface` it's
+// attached to, or how wide that interface's subnet is — normalizes any source topology
+// into the pure point-to-point link set wg-mesh's own model expects, including a
+// hub/star fabric where one wide-subnet interface fans out to several [Peer]s. Only
+// topology (who peers with whom) and endpoints are recovered this way; interface
+// names/ports/subnet sizes from the source fabric are discarded and always regenerated
+// fresh by build() after import — this reconstruction never touches Proxmox itself.
+//
+// Fallback: fabrics with no peers[] data at all (e.g. hand-built before this field
+// existed) fall back to pairing up interfaces that share the same /30 network — this
+// only recovers genuine one-to-one /30 links, not hub/star topologies.
 function reconstructFromNodes(nodesRaw){
   const nodeList = Array.isArray(nodesRaw) ? nodesRaw : (nodesRaw && nodesRaw.data) || [];
   const newPeers = [];
-  const byNetwork = {};
+  const nodeNames = new Set();
   nodeList.forEach(n=>{
-    const name = n.node || n.name || n.id;
+    const name = n.node_id || n.node || n.name || n.id;
     if(!name) return;
+    nodeNames.add(name);
     newPeers.push({ name, endpoint: n.endpoint || '' });
-    parseInterfacesString(n.interfaces).forEach(ifc=>{
-      if(!ifc.ip || !ifc.ip.includes('/')) return;
-      const [ip] = ifc.ip.split('/');
-      const netKey = (ipToInt(ip) & ~3) >>> 0;
-      (byNetwork[netKey] = byNetwork[netKey] || []).push(name);
+  });
+
+  const linkPairMap = new Map(); // "a__b" (sorted) -> [a,b]
+  nodeList.forEach(n=>{
+    const name = n.node_id || n.node || n.name || n.id;
+    if(!name) return;
+    parsePropertyStringList(n.peers).forEach(pr=>{
+      if(pr.node && nodeNames.has(pr.node) && pr.node!==name){
+        const key = [name, pr.node].sort().join('__');
+        linkPairMap.set(key, [name, pr.node]);
+      }
     });
   });
-  const linkPairs = [];
-  Object.values(byNetwork).forEach(group=>{
-    if(group.length===2) linkPairs.push([group[0], group[1]]);
-  });
-  return { newPeers, linkPairs };
+
+  let usedFallback = false;
+  if(linkPairMap.size===0){
+    usedFallback = true;
+    const byNetwork = {};
+    nodeList.forEach(n=>{
+      const name = n.node_id || n.node || n.name || n.id;
+      if(!name) return;
+      parsePropertyStringList(n.interfaces).forEach(ifc=>{
+        if(!ifc.ip || !ifc.ip.includes('/')) return;
+        const [ip] = ifc.ip.split('/');
+        const netKey = (ipToInt(ip) & ~3) >>> 0;
+        (byNetwork[netKey] = byNetwork[netKey] || []).push(name);
+      });
+    });
+    Object.values(byNetwork).forEach(group=>{
+      if(group.length===2){
+        const key = group.slice().sort().join('__');
+        linkPairMap.set(key, group);
+      }
+    });
+  }
+
+  return { newPeers, linkPairs: Array.from(linkPairMap.values()), usedFallback };
 }
 
+// Read-only check: does this fabric already look like a pure point-to-point mesh, or
+// will import have to simplify it (see reconstructFromNodes above)? Same node-list shape.
+function checkCompliance(nodeList){
+  const reasons = [];
+  let hasPeersData = false;
+  nodeList.forEach(n=>{
+    const peerEntries = parsePropertyStringList(n.peers);
+    if(peerEntries.length) hasPeersData = true;
+    const perIface = {};
+    peerEntries.forEach(pr=>{ if(pr.iface) perIface[pr.iface] = (perIface[pr.iface]||0)+1; });
+    if(Object.values(perIface).some(c=>c>1)) reasons.push('an interface has more than one peer');
+    parsePropertyStringList(n.interfaces).forEach(ifc=>{
+      if(ifc.ip && ifc.ip.includes('/')){
+        const prefix = parseInt(ifc.ip.split('/')[1],10);
+        if(!isNaN(prefix) && prefix<30) reasons.push('a subnet is wider than /30');
+      }
+    });
+  });
+  if(!hasPeersData && nodeList.length>0) reasons.push('no peer data to read topology from');
+  return { compliant: reasons.length===0, reasons: Array.from(new Set(reasons)) };
+}
+
+// Fetches (read-only) and caches a fabric's nodes, then shows a short compliance note
+// under the fabric select so the user knows upfront whether import will simplify it.
+async function showFabricCompliance(fabricId){
+  const el = document.getElementById('pveFabricCompliance');
+  if(!fabricId){ el.textContent = ''; el.className = 'hint'; return; }
+  el.className = 'hint';
+  el.textContent = 'Checking…';
+  const prefix = document.getElementById('pveApiPrefix').value.trim() || '/api2/json/cluster/sdn/fabrics';
+  const nodesPath = `${prefix}/node/${fabricId}`;
+  try{
+    const data = await pveRequest('GET', nodesPath);
+    addLog({ method:'GET', path:nodesPath, ok:true, detail: JSON.stringify(data, null, 2) });
+    fetchedNodesCache[fabricId] = data;
+    const nodeList = Array.isArray(data) ? data : (data && data.data) || [];
+    const { compliant, reasons } = checkCompliance(nodeList);
+    if(compliant){
+      el.textContent = '✓ Already point-to-point';
+      el.className = 'hint hint-ok';
+    } else {
+      el.textContent = `⚠ Not point-to-point (${reasons[0]}) — import will simplify it.`;
+      el.className = 'hint hint-warn';
+    }
+  }catch(e){
+    el.textContent = "Couldn't check: " + e.message.split('\n')[0];
+    el.className = 'hint hint-warn';
+  }
+}
+document.getElementById('pveFabricSelect').addEventListener('change', (e)=>showFabricCompliance(e.target.value));
+
+// Import is strictly read-only against Proxmox: it only rewrites local state from data
+// already fetched with GET (reconstructFromNodes above). Never extend this to call
+// pveRequest() with POST/PUT/DELETE — pushing changes back is a separate, explicitly
+// confirmed action (btnPvePush).
 function applyImport(newPeers, linkPairs){
   peers = []; peerSeq = 0; disabledLinks = new Set();
   peerOverrides = {}; linkOverrides = {}; generatedKeys = {};
@@ -1510,13 +1635,15 @@ document.getElementById('btnPveList').onclick = function(){
   return withLoading(this, async ()=>{
     hideStatus('settingsStatus');
     const prefix = document.getElementById('pveApiPrefix').value.trim() || '/api2/json/cluster/sdn/fabrics';
+    const listPath = `${prefix}/fabric`;
     const selectEl = document.getElementById('pveFabricSelect');
     const row = document.getElementById('pveImportRow');
+    fetchedNodesCache = {};
     try{
-      const data = await pveRequest('GET', prefix);
+      const data = await pveRequest('GET', listPath);
       const list = Array.isArray(data) ? data : (data && data.data) || [];
       fetchedFabrics = list.filter(f => (f.protocol||'').toLowerCase() === 'wireguard');
-      addLog({ method:'GET', path:prefix, ok:true, detail: JSON.stringify(data, null, 2) });
+      addLog({ method:'GET', path:listPath, ok:true, detail: JSON.stringify(data, null, 2) });
 
       if(fetchedFabrics.length===0){
         row.style.display = 'none';
@@ -1524,13 +1651,14 @@ document.getElementById('btnPveList').onclick = function(){
         return;
       }
       selectEl.innerHTML = fetchedFabrics.map(f=>{
-        const id = f.fabric || f.id || f.name;
+        const id = f.id || f.fabric || f.name;
         return `<option value="${id}">${id}</option>`;
       }).join('');
       row.style.display = 'block';
       showStatus('settingsStatus','ok', `Found ${fetchedFabrics.length} WireGuard fabric(s) — pick one and import it.`);
+      showFabricCompliance(selectEl.value);
     }catch(e){
-      addLog({ method:'GET', path:prefix, ok:false, detail: e.message });
+      addLog({ method:'GET', path:listPath, ok:false, detail: e.message });
       row.style.display = 'none';
       showStatus('settingsStatus','error', e.message.split('\n')[0]);
     }
@@ -1545,8 +1673,13 @@ document.getElementById('btnPveImport').onclick = function(){
     if(!fabricId) return;
     const nodesPath = `${prefix}/node/${fabricId}`;
     try{
-      const data = await pveRequest('GET', nodesPath);
-      addLog({ method:'GET', path:nodesPath, ok:true, detail: JSON.stringify(data, null, 2) });
+      let data = fetchedNodesCache[fabricId];
+      if(data){
+        addLog({ method:'GET', path:nodesPath, ok:true, detail: '(reused from compliance check)\n'+JSON.stringify(data, null, 2) });
+      } else {
+        data = await pveRequest('GET', nodesPath);
+        addLog({ method:'GET', path:nodesPath, ok:true, detail: JSON.stringify(data, null, 2) });
+      }
       const { newPeers, linkPairs } = reconstructFromNodes(data);
       if(newPeers.length===0){
         showStatus('settingsStatus','error', `Fabric "${fabricId}" has no nodes to import.`);
@@ -1555,8 +1688,10 @@ document.getElementById('btnPveImport').onclick = function(){
       if(peers.length>0 && !window.confirm(`Import "${fabricId}"? This replaces the ${peers.length} peer(s) currently in this tool.`)){
         return;
       }
+      const nodeList = Array.isArray(data) ? data : (data && data.data) || [];
+      const { compliant } = checkCompliance(nodeList);
       applyImport(newPeers, linkPairs);
-      showStatus('settingsStatus','ok', `Imported ${newPeers.length} peer(s) and ${linkPairs.length} link(s) from "${fabricId}". Proxmox doesn't expose private keys via the API, so fresh keys will be generated — click Generate mesh, then push again if you want the fabric back in sync.`);
+      showStatus('settingsStatus','ok', `Imported ${newPeers.length} peer(s), ${linkPairs.length} link(s)${compliant ? '' : ' — simplified to point-to-point'}.`);
     }catch(e){
       addLog({ method:'GET', path:nodesPath, ok:false, detail: e.message });
       showStatus('settingsStatus','error', e.message.split('\n')[0]);
@@ -1573,8 +1708,18 @@ document.getElementById('btnPvePush').onclick = function(){
   const fabricName = (document.getElementById('pveFabricName').value.trim() || 'wgmesh').slice(0,8);
   const internal = document.getElementById('pveInternal').checked;
 
+  const FABRIC_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9-]{0,6}[a-zA-Z0-9]$/;
+  if(!FABRIC_ID_RE.test(fabricName)){
+    showStatus('settingsStatus','error', `Fabric name "${fabricName}" must be 2-8 characters, letters/digits/hyphens only, and can't start or end with a hyphen.`);
+    return;
+  }
+
   const requests = [];
-  requests.push({ method:'POST', path: prefix, body: { fabric: fabricName, protocol: 'wireguard' } });
+  requests.push({ method:'POST', path: `${prefix}/fabric`, body: {
+    id: fabricName,
+    protocol: 'wireguard',
+    persistent_keepalive: document.getElementById('keepalive').checked ? 25 : undefined
+  } });
 
   peers.forEach(p=>{
     const confs = lastBuild.configsByPeer[p.id] || [];
@@ -1589,10 +1734,12 @@ document.getElementById('btnPvePush').onclick = function(){
       method:'POST',
       path: `${prefix}/node/${fabricName}`,
       body: {
-        node: sanitizeName(p.name),
+        node_id: sanitizeNodeId(p.name),
+        protocol: 'wireguard',
         role: internal ? 'internal' : 'external',
         endpoint: p.endpoint || undefined,
-        interfaces: ifaceStrs.join(' ')
+        interfaces: ifaceStrs,
+        peers: buildPeerStrings(confs, internal)
       }
     });
   });
@@ -1604,9 +1751,9 @@ document.getElementById('btnPvePush').onclick = function(){
       return `${r.method} ${r.path}${b}`;
     }).join('\n\n');
     addLog({ method:'DRY RUN', path:`${requests.length} request(s)`, kind:'dry-run',
-      detail: lines + '\n\n# The create-fabric call and the final PUT /cluster/sdn apply call are ' +
-        'confirmed-stable endpoints; the per-node path is newer — check it against your Proxmox ' +
-        "VE version's API viewer or fall back to the fabrics.cfg snippet + GUI import if it 404s." });
+      detail: lines + '\n\n# Endpoints and field names confirmed against the Proxmox VE SDN Fabrics ' +
+        'API schema (cluster/sdn/fabrics/fabric, cluster/sdn/fabrics/node/{fabric_id}). Double-check ' +
+        "the fabric ID and interface/peer lists still look right for your cluster before turning off dry run." });
     showStatus('settingsStatus','ok', `Dry run — ${requests.length} request(s) logged, nothing sent.`);
     switchMainTab('logs');
     return;
