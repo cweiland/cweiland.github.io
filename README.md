@@ -183,6 +183,24 @@ touch devices.
 - API buttons show a loading state and a confirmation prompt before any
   non-dry-run write to your Proxmox host.
 
+## Importing an existing fabric
+
+Settings → Proxmox API now has a 4-step flow:
+
+1. Fill in host, token, and (if needed) the fabrics API path.
+2. **List WireGuard fabrics** — fetches all fabrics on the cluster and keeps
+   the WireGuard ones.
+3. Pick one from the dropdown that appears.
+4. **Import selected fabric** — fetches that fabric's nodes and rebuilds
+   peers + links in the tool by pairing up interfaces that share the same
+   /30 (works without needing the not-yet-stable "peers" field). This
+   replaces whatever's currently in Nodes/Custom, after a confirmation.
+
+Proxmox never exposes private keys through its API (they live in
+`/etc/pve/priv/wg-keys.cfg`), so import can't recover the exact keys already
+in use — it reconstructs topology and endpoints, then you generate fresh
+keys and push again if you want the fabric fully back in sync.
+
 ## Notes on the model
 
 - **Subnet allocation**: link N gets the N-th `/30` out of the base CIDR (default `10.10.0.0/16`), in the order links are created. The lower-index peer of the pair gets `.1`, the other gets `.2`.
